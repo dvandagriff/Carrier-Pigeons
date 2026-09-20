@@ -1,0 +1,21 @@
+# CarrierPigeons Configuration
+
+node_id: "edge-node-01"
+
+metrics:
+  enabled_collectors:
+    - cpu
+    - memory
+
+publisher:
+  broker_url: "tcp://localhost:1883"
+  client_id: "carrier-pigeon-01"
+  username: ""
+  password: ""
+  topic: "telemetry"
+  keep_alive: 30
+  clean_session: true
+
+scheduler:
+  metric_channel_size: 1000
+  outbound_channel_size: 10000

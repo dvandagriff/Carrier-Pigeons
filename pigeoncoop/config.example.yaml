@@ -1,0 +1,27 @@
+# PigeonCoop Configuration
+
+mqtt:
+  broker_url: "tcp://localhost:1883"
+  client_id: "pigeoncoop-01"
+  username: ""
+  password: ""
+  keep_alive: 30
+  clean_session: true
+
+storage:
+  host: "localhost"
+  port: 5432
+  user: "pigeoncoop"
+  password: "secret"
+  database: "telemetry"
+  ssl_mode: "disable"
+  pool_size: 20
+
+worker:
+  worker_count: 8
+  channel_buffer: 10000
+  batch_size: 100
+  flush_interval: 1s
+
+metrics:
+  prometheus_port: 9090
