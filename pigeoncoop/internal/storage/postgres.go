@@ -104,9 +104,9 @@ func (s *PostgresStore) InsertBatch(ctx context.Context, payloads []TelemetryRec
 		return fmt.Errorf("store not initialized")
 	}
 
-	// Marshal metadata to JSON
+	// Marshal metadata to JSON and batch inserts
 	batch := &pgx.Batch{}
-	
+
 	for _, p := range payloads {
 		metadataJSON, err := json.Marshal(p.Metadata)
 		if err != nil {

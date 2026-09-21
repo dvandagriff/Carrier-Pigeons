@@ -49,8 +49,8 @@ type Machine struct {
 	stopped chan struct{}
 
 	// Retry configuration
-	minBackoff time.Duration
-	maxBackoff time.Duration
+	minBackoff     time.Duration
+	maxBackoff     time.Duration
 	currentBackoff time.Duration
 
 	// Callbacks
@@ -156,7 +156,7 @@ func (m *Machine) isValidTransition(from, to State) bool {
 func (m *Machine) BackoffDuration() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	duration := m.currentBackoff
 	m.currentBackoff *= 2
 	if m.currentBackoff > m.maxBackoff {

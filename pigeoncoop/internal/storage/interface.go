@@ -26,11 +26,11 @@ type TelemetryStore interface {
 
 // TelemetryRecord represents a database record for telemetry data.
 type TelemetryRecord struct {
-	NodeID      string
-	Timestamp   time.Time
-	MetricType  string
-	Value       float64
-	Metadata    map[string]string
+	NodeID     string
+	Timestamp  time.Time
+	MetricType string
+	Value      float64
+	Metadata   map[string]string
 }
 
 // StoreConfig holds configuration for creating a TelemetryStore.

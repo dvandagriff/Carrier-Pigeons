@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -13,10 +14,9 @@ import (
 
 // MQTTClient implements PubSubClient using paho.golang MQTT library.
 type MQTTClient struct {
-	config   *ClientConfig
-	client   *paho.Client
-	connDetails *paho.Connect
-	mu       sync.RWMutex
+	config *ClientConfig
+	client *paho.Client
+	mu     sync.RWMutex
 
 	// For tracking connection state
 	connectedCh chan struct{}
@@ -32,43 +32,58 @@ func NewMQTTClient(cfg *ClientConfig) *MQTTClient {
 
 // Connect establishes a connection to the MQTT broker.
 func (m *MQTTClient) Connect(ctx context.Context) error {
-	// Create client options
-	opts := paho.NewClientOptions().
-		SetClientID(m.config.ClientID).
-		SetAutoAcknowledged(true).
-		SetCleanSession(m.config.CleanSession).
-		SetKeepAlive(m.config.KeepAlive * time.Second).
-		SetConnectTimeout(30 * time.Second).
-		SetServerAddresses([]string{m.config.BrokerURL})
+	// Parse broker URL
+	urls := []string{m.config.BrokerURL}
 
-	if m.config.Username != "" {
-		opts.SetUsername(m.config.Username)
+	// Create a TCP connection
+	conn, err := net.DialTimeout("tcp", urls[0], 30*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to broker: %w", err)
 	}
-	if m.config.Password != "" {
-		opts.SetPassword([]byte(m.config.Password))
+
+	// Create client config
+	conf := paho.ClientConfig{
+		ClientID: m.config.ClientID,
+		Conn:     conn,
 	}
 
 	// Set up connection handler
-	opts.SetOnConnectHandler(m.onConnect)
-	opts.SetConnectionLostHandler(m.onConnectionLost)
+	conf.OnServerDisconnect = func(d *paho.Disconnect) {
+		slog.Error("MQTT server disconnected", "reason", d.ReasonCode)
+	}
 
 	// Create client
-	client, err := paho.NewClient(opts)
-	if err != nil {
-		return fmt.Errorf("failed to create client: %w", err)
+	client := paho.NewClient(conf)
+
+	// Create connect packet
+	connect := &paho.Connect{
+		ClientID:     m.config.ClientID,
+		KeepAlive:    uint16(m.config.KeepAlive),
+		CleanStart:   m.config.CleanSession,
+		UsernameFlag: m.config.Username != "",
+		PasswordFlag: m.config.Password != "",
+		Username:     m.config.Username,
+		Password:     []byte(m.config.Password),
+	}
+
+	if connect.KeepAlive == 0 {
+		connect.KeepAlive = 30 // default
 	}
 
 	// Connect
-	connACK, err := client.Connect(ctx)
+	connACK, err := client.Connect(ctx, connect)
 	if err != nil {
+		conn.Close()
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	if connACK.ReturnCode != paho.ConnectReturnCodeSuccess {
-		return fmt.Errorf("connection rejected: %v", connACK.ReturnCode)
+	if connACK.ReasonCode != 0 {
+		conn.Close()
+		return fmt.Errorf("connection rejected: %v", connACK.ReasonCode)
 	}
 
 	m.client = client
+	close(m.connectedCh)
 	return nil
 }
 
@@ -81,13 +96,11 @@ func (m *MQTTClient) Disconnect(ctx context.Context) error {
 		return nil
 	}
 
-	// Unsubscribe from all topics
-	// Note: In a real implementation, you'd track subscriptions
-
 	// Disconnect
-	opts := paho.NewDisconnect().WithReasonCode(0)
-	_, err := m.client.Disconnect(ctx, opts)
-	if err != nil {
+	disconnect := &paho.Disconnect{
+		ReasonCode: 0,
+	}
+	if err := m.client.Disconnect(disconnect); err != nil {
 		return fmt.Errorf("failed to disconnect: %w", err)
 	}
 
@@ -104,22 +117,34 @@ func (m *MQTTClient) Subscribe(ctx context.Context, topic string, qos byte, call
 		return fmt.Errorf("not connected")
 	}
 
-	// Create subscription
-	subOpts := paho.NewSubscribeOptions(qos)
-	subOpts.SetOnMessage(func(_ context.Context, msg *paho.Publish) {
+	// Set up message handler for this subscription
+	handler := func(pr paho.PublishReceived) (bool, error) {
+		msg := pr.Packet
 		callback(ctx, msg.Payload)
-	})
+		return true, nil
+	}
+
+	m.client.AddOnPublishReceived(handler)
 
 	// Subscribe
-	resp, err := m.client.Subscribe(ctx, paho.NewSubscribeRequest(topic, subOpts))
+	sub := &paho.Subscribe{
+		Subscriptions: []paho.SubscribeOptions{
+			{
+				Topic: topic,
+				QoS:   qos,
+			},
+		},
+	}
+
+	resp, err := m.client.Subscribe(ctx, sub)
 	if err != nil {
 		return fmt.Errorf("failed to subscribe: %w", err)
 	}
 
 	// Check subscription response
-	for _, sub := range resp.Subscriptions {
-		if sub.ReturnCode > 2 {
-			return fmt.Errorf("subscription rejected: %v", sub.ReturnCode)
+	for _, reason := range resp.Reasons {
+		if reason > 2 {
+			return fmt.Errorf("subscription rejected: %v", reason)
 		}
 	}
 
@@ -135,10 +160,12 @@ func (m *MQTTClient) Publish(ctx context.Context, topic string, qos byte, payloa
 		return fmt.Errorf("not connected")
 	}
 
-	msg := paho.NewPublish(topic).
-		SetQoS(qos).
-		SetRetained(false).
-		SetPayload(payload)
+	msg := &paho.Publish{
+		Topic:   topic,
+		QoS:     qos,
+		Retain:  false,
+		Payload: payload,
+	}
 
 	_, err := m.client.Publish(ctx, msg)
 	return err
@@ -154,14 +181,4 @@ func (m *MQTTClient) IsConnected() bool {
 // ConnectionReady returns a channel that is closed when connected.
 func (m *MQTTClient) ConnectionReady() <-chan struct{} {
 	return m.connectedCh
-}
-
-func (m *MQTTClient) onConnect(client *paho.Client, connACK *paho.ConnectAck) {
-	slog.Info("MQTT connected")
-	close(m.connectedCh)
-}
-
-func (m *MQTTClient) onConnectionLost(client *paho.Client, err error) {
-	slog.Error("MQTT connection lost", slog.String("error", err.Error()))
-	// Reconnect logic would be handled by the state machine
 }

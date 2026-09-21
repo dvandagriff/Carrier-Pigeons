@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/dvandagriff/Carrier-Pigeons/pigeoncoop/cmd"
+	"github.com/dvandagriff/Carrier-Pigeons/pigeoncoop/internal/config"
 	"github.com/dvandagriff/Carrier-Pigeons/pigeoncoop/internal/pubsub"
 	"github.com/dvandagriff/Carrier-Pigeons/pigeoncoop/internal/state"
 	"github.com/dvandagriff/Carrier-Pigeons/pigeoncoop/internal/storage"
@@ -19,7 +20,7 @@ import (
 
 // App is the main application orchestrator.
 type App struct {
-	config         cmd.Config
+	config         config.Config
 	state          *state.Machine
 	pubSub         *pubsub.MQTTClient
 	telemetryStore storage.TelemetryStore
@@ -29,10 +30,10 @@ type App struct {
 }
 
 // New creates a new App instance.
-func New(config cmd.Config) *App {
+func New(cfg config.Config) *App {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &App{
-		config: config,
+		config: cfg,
 		state:  state.NewMachine(),
 		ctx:    ctx,
 		cancel: cancel,

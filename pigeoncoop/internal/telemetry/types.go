@@ -5,11 +5,11 @@ import "time"
 
 // TelemetryPayload represents a generic telemetry event from an edge node.
 type TelemetryPayload struct {
-	NodeID      string            `json:"node_id"`
-	Timestamp   time.Time         `json:"timestamp"`
-	MetricType  string            `json:"metric_type"`
-	Value       float64           `json:"value"`
-	Metadata    map[string]string `json:"metadata"`
+	NodeID     string            `json:"node_id"`
+	Timestamp  time.Time         `json:"timestamp"`
+	MetricType string            `json:"metric_type"`
+	Value      float64           `json:"value"`
+	Metadata   map[string]string `json:"metadata"`
 }
 
 // Validate checks if the payload has all required fields.
@@ -25,7 +25,7 @@ func (p *TelemetryPayload) Validate() error {
 
 // Error constants for telemetry validation.
 var (
-	ErrMissingNodeID    = &TelemetryError{Message: "missing node_id"}
+	ErrMissingNodeID     = &TelemetryError{Message: "missing node_id"}
 	ErrMissingMetricType = &TelemetryError{Message: "missing metric_type"}
 )
 

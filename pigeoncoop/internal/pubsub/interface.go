@@ -27,10 +27,10 @@ type PubSubClient interface {
 
 // ClientConfig holds configuration for creating a PubSubClient.
 type ClientConfig struct {
-	BrokerURL     string
-	ClientID      string
-	Username      string
-	Password      string
-	KeepAlive     int
-	CleanSession  bool
+	BrokerURL    string
+	ClientID     string
+	Username     string
+	Password     string
+	KeepAlive    int
+	CleanSession bool
 }

@@ -1,5 +1,5 @@
-// Package cmd contains command-line utilities and configuration loading.
-package cmd
+// Package config contains configuration loading for PigeonCoop.
+package config
 
 import (
 	"fmt"
@@ -14,10 +14,10 @@ import (
 
 // Config holds the full application configuration.
 type Config struct {
-	MQTT      MQTTConfig      `yaml:"mqtt"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Worker    WorkerConfig    `yaml:"worker"`
-	Metrics   MetricsConfig   `yaml:"metrics"`
+	MQTT    MQTTConfig    `yaml:"mqtt"`
+	Storage StorageConfig `yaml:"storage"`
+	Worker  WorkerConfig  `yaml:"worker"`
+	Metrics MetricsConfig `yaml:"metrics"`
 }
 
 // MQTTConfig holds MQTT-specific configuration.
@@ -54,9 +54,9 @@ type MetricsConfig struct {
 	PrometheusPort int `yaml:"prometheus_port"`
 }
 
-// ToClientConfig converts MQTTConfig to pubsub.ClientConfig.
-func (m MQTTConfig) ToClientConfig() pubsub.ClientConfig {
-	return pubsub.ClientConfig{
+// ToClientConfig converts MQTTConfig to *pubsub.ClientConfig.
+func (m MQTTConfig) ToClientConfig() *pubsub.ClientConfig {
+	return &pubsub.ClientConfig{
 		BrokerURL:    m.BrokerURL,
 		ClientID:     m.ClientID,
 		Username:     m.Username,
@@ -66,9 +66,9 @@ func (m MQTTConfig) ToClientConfig() pubsub.ClientConfig {
 	}
 }
 
-// ToStoreConfig converts StorageConfig to storage.StoreConfig.
-func (s StorageConfig) ToStoreConfig() storage.StoreConfig {
-	return storage.StoreConfig{
+// ToStoreConfig converts StorageConfig to *storage.StoreConfig.
+func (s StorageConfig) ToStoreConfig() *storage.StoreConfig {
+	return &storage.StoreConfig{
 		Host:     s.Host,
 		Port:     s.Port,
 		User:     s.User,
@@ -96,17 +96,17 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	var config Config
-	if err := yaml.Unmarshal(data, &config); err != nil {
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("failed to parse config: %w", err)
 	}
 
 	// Validate configuration
-	if err := config.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 
-	return config, nil
+	return cfg, nil
 }
 
 // Validate checks that required configuration values are present.

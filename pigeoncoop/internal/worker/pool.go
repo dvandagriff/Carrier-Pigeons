@@ -31,11 +31,11 @@ type WorkerPool struct {
 
 // TelemetryRecord is a record ready for storage.
 type TelemetryRecord struct {
-	NodeID      string
-	Timestamp   time.Time
-	MetricType  string
-	Value       float64
-	Metadata    map[string]string
+	NodeID     string
+	Timestamp  time.Time
+	MetricType string
+	Value      float64
+	Metadata   map[string]string
 }
 
 // NewWorkerPool creates a new worker pool with the given configuration.
