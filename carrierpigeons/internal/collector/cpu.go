@@ -1,3 +1,4 @@
+// Package collector defines the interface for system metric collection.
 //go:build linux
 
 package collector
@@ -10,13 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-)
-
-const (
-	cpuTempPath     = "/sys/class/thermal"
-	thermalZonePath = "/sys/class/thermal/thermal_zone"
-	cpuFreqPath     = "/sys/devices/system/cpu/cpu0/cpufreq"
 )
 
 // CPUCollector collects CPU temperature and frequency metrics on Linux.
@@ -82,6 +78,13 @@ func (c *CPUCollector) getThermalZones(ctx context.Context) ([]Metric, error) {
 	}
 
 	for _, entry := range entries {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return metrics, ctx.Err()
+		default:
+		}
+
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "thermal_zone") {
 			continue
 		}
@@ -137,10 +140,10 @@ func (c *CPUCollector) getCPUFrequencies(ctx context.Context) ([]Metric, error) 
 	}
 
 	// Read current frequency
-	currentFreqPath := filepath.Join(cpuFreqPath, " scaling_cur_freq")
+	currentFreqPath := filepath.Join(cpuFreqPath, "scaling_cur_freq")
 	if freqData, err := os.ReadFile(currentFreqPath); err == nil {
 		freqValue, _ := strconv.ParseFloat(strings.TrimSpace(string(freqData)), 64)
-		
+
 		metadata := make(map[string]string)
 		for k, v := range c.config.Labels {
 			metadata[k] = v
@@ -158,10 +161,10 @@ func (c *CPUCollector) getCPUFrequencies(ctx context.Context) ([]Metric, error) 
 	}
 
 	// Read maximum frequency
-	maxFreqPath := filepath.Join(cpuFreqPath, " scaling_max_freq")
+	maxFreqPath := filepath.Join(cpuFreqPath, "scaling_max_freq")
 	if freqData, err := os.ReadFile(maxFreqPath); err == nil {
 		freqValue, _ := strconv.ParseFloat(strings.TrimSpace(string(freqData)), 64)
-		
+
 		metadata := make(map[string]string)
 		for k, v := range c.config.Labels {
 			metadata[k] = v
@@ -181,116 +184,11 @@ func (c *CPUCollector) getCPUFrequencies(ctx context.Context) ([]Metric, error) 
 	return metrics, nil
 }
 
-// MemoryCollector collects memory usage metrics.
-type MemoryCollector struct {
-	config *CollectorConfig
-}
-
-// NewMemoryCollector creates a new memory metric collector for Linux.
-func NewMemoryCollector(config *CollectorConfig) *MemoryCollector {
-	if config == nil {
-		config = &CollectorConfig{
-			Labels: make(map[string]string),
+// Pool for Metric instances to reduce GC pressure
+var metricPool = sync.Pool{
+	New: func() interface{} {
+		return &Metric{
+			Metadata: make(map[string]string),
 		}
-	}
-	return &MemoryCollector{config: config}
-}
-
-// Name returns the collector's identifier.
-func (m *MemoryCollector) Name() string {
-	return "memory_linux"
-}
-
-// Interval returns the recommended collection interval for memory metrics.
-func (m *MemoryCollector) Interval() time.Duration {
-	return 15 * time.Second
-}
-
-// Collect retrieves memory metrics from /proc/meminfo.
-func (m *MemoryCollector) Collect(ctx context.Context) ([]Metric, error) {
-	var metrics []Metric
-
-	meminfoPath := "/proc/meminfo"
-	file, err := os.Open(meminfoPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open meminfo: %w", err)
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	memInfo := make(map[string]int64)
-
-	for scanner.Scan() {
-		fields := strings.Split(scanner.Text(), ":")
-		if len(fields) != 2 {
-			continue
-		}
-		
-		name := strings.TrimSpace(fields[0])
-		valueStr := strings.TrimSpace(fields[1])
-		valueStr = strings.TrimSuffix(valueStr, " kB")
-		
-		value, err := strconv.ParseInt(strings.TrimSpace(valueStr), 10, 64)
-		if err != nil {
-			continue
-		}
-		
-		memInfo[name] = value
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading meminfo: %w", err)
-	}
-
-	// Calculate memory metrics
-	totalKB := memInfo["MemTotal"]
-	freeKB := memInfo["MemFree"]
-	availableKB := memInfo["MemAvailable"]
-	buffersKB := memInfo["Buffers"]
-	cachedKB := memInfo["Cached"]
-	reclaimableKB := memInfo["SReclaimable"]
-	shmemKB := memInfo["Shmem"]
-
-	// Available memory (from /proc/meminfo definition)
-	availableMemoryKB := availableKB
-	if availableKB == 0 {
-		availableMemoryKB = freeKB + buffersKB + cachedKB - reclaimableKB - shmemKB
-	}
-
-	// Total used memory
-	usedMemoryKB := totalKB - availableMemoryKB
-
-	// Memory usage percentage
-	memUsagePercent := float64(usedMemoryKB) / float64(totalKB) * 100.0
-
-	// Memory available percentage
-	memAvailablePercent := float64(availableMemoryKB) / float64(totalKB) * 100.0
-
-	// Convert to bytes for precise values
-	totalBytes := float64(totalKB) * 1024
-	availableBytes := float64(availableMemoryKB) * 1024
-	usedBytes := float64(usedMemoryKB) * 1024
-
-	metadata := make(map[string]string)
-	for k, v := range m.config.Labels {
-		metadata[k] = v
-	}
-
-	metrics = append(metrics, Metric{
-		NodeID:      "carrier-pigeon",
-		Timestamp:   time.Now(),
-		MetricType:  MetricTypeMemoryUsage,
-		Value:       memUsagePercent,
-		Metadata:    metadata,
-	})
-
-	metrics = append(metrics, Metric{
-		NodeID:      "carrier-pigeon",
-		Timestamp:   time.Now(),
-		MetricType:  MetricTypeMemoryAvailable,
-		Value:       memAvailablePercent,
-		Metadata:    metadata,
-	})
-
-	return metrics, nil
+	},
 }

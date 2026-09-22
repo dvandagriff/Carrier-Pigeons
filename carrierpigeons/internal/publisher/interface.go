@@ -4,7 +4,6 @@ package publisher
 import (
 	"context"
 	"encoding/json"
-	"time"
 )
 
 // Publisher defines the interface for publishing telemetry data.

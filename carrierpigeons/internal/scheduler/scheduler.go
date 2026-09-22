@@ -3,6 +3,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -20,12 +21,22 @@ type Scheduler struct {
 	wg           sync.WaitGroup
 	metricChan   chan collector.Metric
 	outboundChan chan collector.Metric
+
+	// Metrics for monitoring
+	totalMetricsCollected uint64
+	totalMetricsPublished uint64
+	totalMetricsDropped   uint64
+	metricsMu            sync.Mutex
+
+	// Configuration
+	maxBatchSize int
 }
 
 // Config holds configuration for the scheduler.
 type Config struct {
-	MetricChannelSize int
+	MetricChannelSize   int
 	OutboundChannelSize int
+	MaxBatchSize        int
 }
 
 // NewScheduler creates a new scheduler with the given collectors and publisher.
@@ -38,6 +49,7 @@ func NewScheduler(
 		config = &Config{
 			MetricChannelSize:   1000,
 			OutboundChannelSize: 10000,
+			MaxBatchSize:        100,
 		}
 	}
 
@@ -49,6 +61,7 @@ func NewScheduler(
 		cancel:        cancel,
 		metricChan:    make(chan collector.Metric, config.MetricChannelSize),
 		outboundChan:  make(chan collector.Metric, config.OutboundChannelSize),
+		maxBatchSize:  config.MaxBatchSize,
 	}
 }
 
@@ -117,22 +130,35 @@ func (s *Scheduler) collectOnce(c collector.MetricCollector) {
 
 	slog.Debug("collected metrics", "collector", c.Name(), "count", len(metrics))
 
-	// Send metrics to outbound channel
+	// Send metrics to outbound channel with backpressure handling
 	for _, metric := range metrics {
 		select {
 		case s.outboundChan <- metric:
 			// Metric queued successfully
+			s.metricsMu.Lock()
+			s.totalMetricsCollected++
+			s.metricsMu.Unlock()
 		case <-s.ctx.Done():
 			// Scheduler stopped, drop metric
+			slog.Debug("scheduler stopped during metric collection")
 			return
 		default:
-			// Channel full, drop metric
-			slog.Warn("outbound channel full, dropping metric", "collector", c.Name())
+			// Channel full, drop metric with backpressure logging
+			s.metricsMu.Lock()
+			s.totalMetricsDropped++
+			droppedCount := s.totalMetricsDropped
+			s.metricsMu.Unlock()
+			
+			if droppedCount%100 == 0 {
+				slog.Warn("backpressure: dropping metrics due to channel full",
+					"collector", c.Name(),
+					"dropped_total", droppedCount)
+			}
 		}
 	}
 }
 
-// publishMetrics reads metrics from the outbound channel and publishes them.
+// publishMetrics reads metrics from the outbound channel and publishes them with batching.
 func (s *Scheduler) publishMetrics() {
 	defer s.wg.Done()
 
@@ -144,48 +170,81 @@ func (s *Scheduler) publishMetrics() {
 		return
 	}
 
+	batch := make([]collector.Metric, 0, s.maxBatchSize)
+	ticker := time.NewTicker(100 * time.Millisecond) // Flush interval
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-s.ctx.Done():
-			// Publish any remaining metrics
-			s.flushOutbound()
+			// Final flush of remaining metrics
+			s.flushBatch(batch)
 			slog.Info("publisher stopped")
 			return
 
 		case metric, ok := <-s.outboundChan:
 			if !ok {
-				// Channel closed
+				// Channel closed, flush remaining batch
+				s.flushBatch(batch)
 				return
 			}
 
-			// Publish the metric
-			pubCtx, pubCancel := context.WithTimeout(s.ctx, 10*time.Second)
-			if err := s.publisher.Publish(pubCtx, metric); err != nil {
-				slog.Error("failed to publish metric", 
-					"metric_type", metric.MetricType,
-					"node_id", metric.NodeID,
-					"error", err.Error())
+			batch = append(batch, metric)
+
+			// Flush when batch is full
+			if len(batch) >= s.maxBatchSize {
+				s.flushBatch(batch)
+				batch = make([]collector.Metric, 0, s.maxBatchSize)
 			}
-			pubCancel()
+
+		case <-ticker.C:
+			// Periodic flush of accumulated metrics
+			if len(batch) > 0 {
+				s.flushBatch(batch)
+				batch = make([]collector.Metric, 0, s.maxBatchSize)
+			}
 		}
 	}
 }
 
-// flushOutbound sends any remaining metrics in the outbound channel.
-func (s *Scheduler) flushOutbound() {
-	for {
+// flushBatch publishes a batch of metrics.
+func (s *Scheduler) flushBatch(metrics []collector.Metric) {
+	if len(metrics) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+	defer cancel()
+
+	// Create publisher metrics
+	pbMetrics := make([]publisher.Metric, 0, len(metrics))
+	for _, m := range metrics {
+		pubMetric := publisher.Metric{
+			NodeID:      m.NodeID,
+			Timestamp:   m.Timestamp.Format(time.RFC3339Nano),
+			MetricType:  string(m.MetricType),
+			Value:       m.Value,
+			Metadata:    m.Metadata,
+		}
+		pbMetrics = append(pbMetrics, pubMetric)
+	}
+
+	// Publish batch
+	for _, metric := range pbMetrics {
 		select {
-		case metric, ok := <-s.outboundChan:
-			if !ok {
-				return
-			}
-			pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := s.publisher.Publish(pubCtx, metric); err != nil {
-				slog.Error("failed to flush metric", "error", err.Error())
-			}
-			pubCancel()
-		default:
+		case <-ctx.Done():
 			return
+		default:
+			if err := s.publisher.Publish(ctx, metric); err != nil {
+				slog.Error("failed to publish metric in batch",
+					"metric_type", metric.MetricType,
+					"node_id", metric.NodeID,
+					"error", err.Error())
+			} else {
+				s.metricsMu.Lock()
+				s.totalMetricsPublished++
+				s.metricsMu.Unlock()
+			}
 		}
 	}
 }
@@ -193,4 +252,42 @@ func (s *Scheduler) flushOutbound() {
 // OutboundChannel returns the channel for external metric injection.
 func (s *Scheduler) OutboundChannel() chan<- collector.Metric {
 	return s.outboundChan
+}
+
+// Metrics returns scheduler metrics.
+func (s *Scheduler) Metrics() (collected, published, dropped uint64) {
+	s.metricsMu.Lock()
+	defer s.metricsMu.Unlock()
+	return s.totalMetricsCollected, s.totalMetricsPublished, s.totalMetricsDropped
+}
+
+// PublishMetricsBatch publishes a batch of metrics with improved performance.
+func (s *Scheduler) PublishMetricsBatch(ctx context.Context, metrics []collector.Metric) error {
+	// Use context-aware publish with retry
+	for i, metric := range metrics {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled during batch publish: %w", ctx.Err())
+		default:
+			pubMetric := publisher.Metric{
+				NodeID:      metric.NodeID,
+				Timestamp:   metric.Timestamp.Format(time.RFC3339Nano),
+				MetricType:  string(metric.MetricType),
+				Value:       metric.Value,
+				Metadata:    metric.Metadata,
+			}
+			if err := s.publisher.Publish(ctx, pubMetric); err != nil {
+				// Log error but continue with remaining metrics
+				slog.Error("failed to publish metric in batch",
+					"index", i,
+					"metric_type", metric.MetricType,
+					"error", err.Error())
+			} else {
+				s.metricsMu.Lock()
+				s.totalMetricsPublished++
+				s.metricsMu.Unlock()
+			}
+		}
+	}
+	return nil
 }

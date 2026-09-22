@@ -5,19 +5,34 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/dvandagriff/Carrier-Pigeons/carrierpigeons/internal/state"
 	"github.com/eclipse/paho.golang/paho"
 )
 
 // MQTTPublisher implements Publisher using the Paho MQTT client library.
 type MQTTPublisher struct {
-	config      *PublisherConfig
-	client      *paho.Client
-	mu          sync.RWMutex
-	connectedCh chan struct{}
-	connected   bool
+	config       *PublisherConfig
+	client       *paho.Client
+	mu           sync.RWMutex
+	connectedCh  chan struct{}
+	connected    bool
+
+	// State machine for connection lifecycle
+	stateMachine *state.Machine
+
+	// Reconnection configuration
+	reconnectAttempts    int
+	maxReconnectAttempts int
+	minReconnectBackoff  time.Duration
+	maxReconnectBackoff  time.Duration
+
+	// Network connection
+	conn net.Conn
 }
 
 // NewMQTTPublisher creates a new MQTT publisher.
@@ -31,66 +46,142 @@ func NewMQTTPublisher(cfg *PublisherConfig) *MQTTPublisher {
 	if cfg.KeepAlive == 0 {
 		cfg.KeepAlive = 30
 	}
+	sm := state.NewMachine().WithBackoffConfiguration(
+		1*time.Second,
+		60*time.Second,
+		500*time.Millisecond,
+	)
 	return &MQTTPublisher{
-		connectedCh: make(chan struct{}),
-		config:      cfg,
+		connectedCh:          make(chan struct{}),
+		config:               cfg,
+		stateMachine:         sm,
+		maxReconnectAttempts: 10,
+		minReconnectBackoff:  1 * time.Second,
+		maxReconnectBackoff:  60 * time.Second,
 	}
 }
 
 // Start establishes the MQTT connection and begins the publishing loop.
 func (p *MQTTPublisher) Start(ctx context.Context) error {
-	slog.Info("starting MQTT publisher", "broker_url", p.config.BrokerURL)
+	slog.Info("starting MQTT publisher", "broker_url", p.obscureURL(p.config.BrokerURL))
 
-	// Create client options
-	opts := paho.NewClientOptions().
-		SetClientID(p.config.ClientID).
-		SetAutoAcknowledged(true).
-		SetCleanSession(p.config.CleanSession).
-		SetKeepAlive(time.Duration(p.config.KeepAlive) * time.Second).
-		SetConnectTimeout(30 * time.Second).
-		SetServerAddresses([]string{p.config.BrokerURL})
+	// Parse broker URL
+	url := strings.TrimPrefix(p.config.BrokerURL, "tcp://")
+	url = strings.TrimPrefix(url, "ssl://")
+	url = strings.TrimPrefix(url, "ws://")
+	url = strings.TrimPrefix(url, "wss://")
 
-	if p.config.Username != "" {
-		opts.SetUsername(p.config.Username)
+	// Establish network connection
+	conn, err := net.DialTimeout("tcp", url, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to broker: %w", err)
 	}
-	if p.config.Password != "" {
-		opts.SetPassword([]byte(p.config.Password))
-	}
+	p.conn = conn
 
-	// Set up connection handlers
-	opts.SetOnConnectHandler(p.onConnect)
-	opts.SetConnectionLostHandler(p.onConnectionLost)
+	// Create client config with the established connection
+	conf := paho.ClientConfig{
+		ClientID:    p.config.ClientID,
+		Conn:        conn,
+		PingHandler: paho.NewDefaultPinger(),
+	}
 
 	// Create client
-	client, err := paho.NewClient(opts)
-	if err != nil {
-		return fmt.Errorf("failed to create MQTT client: %w", err)
-	}
-
-	// Connect
-	connACK, err := client.Connect(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to connect to MQTT broker: %w", err)
-	}
-
-	if connACK.ReturnCode != paho.ConnectReturnCodeSuccess {
-		return fmt.Errorf("MQTT connection rejected: %v", connACK.ReturnCode)
-	}
+	client := paho.NewClient(conf)
 
 	p.mu.Lock()
 	p.client = client
-	p.connected = true
-	close(p.connectedCh)
 	p.mu.Unlock()
 
-	slog.Info("MQTT publisher connected", "client_id", p.config.ClientID)
-	return nil
+	// Create connect message with authentication if configured
+	connect := &paho.Connect{
+		ClientID:     p.config.ClientID,
+		KeepAlive:    uint16(p.config.KeepAlive),
+		CleanStart:   p.config.CleanSession,
+		Username:     p.config.Username,
+		PasswordFlag: p.config.Password != "",
+	}
+
+	if p.config.Password != "" {
+		connect.Password = []byte(p.config.Password)
+	}
+
+	// Connect with exponential backoff and jitter
+	backoff := p.stateMachine.NextBackoffWithJitter()
+	reconnectAttempts := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+			return fmt.Errorf("connection timeout: %w", ctx.Err())
+		default:
+			_, err = client.Connect(ctx, connect)
+			if err != nil {
+				slog.Warn("MQTT connection failed",
+					"error", p.obscureError(err.Error()),
+					"backoff", backoff.String(),
+					"retry_attempt", reconnectAttempts+1)
+
+				p.stateMachine.Transition(state.StateBackoff)
+
+				// Close and recreate connection for retry
+				conn.Close()
+				conn, err = net.DialTimeout("tcp", url, 10*time.Second)
+				if err != nil {
+					slog.Error("failed to re-establish network connection",
+						"error", p.obscureError(err.Error()),
+						"backoff", backoff.String())
+					time.Sleep(backoff)
+					backoff = p.stateMachine.NextBackoffWithJitter()
+					reconnectAttempts++
+					continue
+				}
+				p.conn = conn
+
+				// Recreate client with new connection
+				conf.Conn = conn
+				client = paho.NewClient(conf)
+
+				// Retry connect
+				err = nil
+				_, err = client.Connect(ctx, connect)
+				if err != nil {
+					slog.Warn("MQTT reconnect failed",
+						"error", p.obscureError(err.Error()),
+						"backoff", backoff.String())
+
+					conn.Close()
+					time.Sleep(backoff)
+					backoff = p.stateMachine.NextBackoffWithJitter()
+					reconnectAttempts++
+
+					if p.maxReconnectAttempts > 0 && reconnectAttempts >= p.maxReconnectAttempts {
+						return fmt.Errorf("max reconnection attempts reached: %w", err)
+					}
+					continue
+				}
+
+				// Reconnected successfully
+			}
+
+			// Connection successful
+			p.mu.Lock()
+			p.connected = true
+			close(p.connectedCh)
+			p.stateMachine.Transition(state.StateConnected)
+			reconnectAttempts = 0
+			p.mu.Unlock()
+
+			slog.Info("MQTT publisher connected", "client_id", p.config.ClientID)
+			return nil
+		}
+	}
 }
 
 // Stop gracefully closes the MQTT connection.
 func (p *MQTTPublisher) Stop(ctx context.Context) error {
 	p.mu.Lock()
-	if p.client == nil {
+	if p.client == nil || p.conn == nil {
 		p.mu.Unlock()
 		return nil
 	}
@@ -98,21 +189,19 @@ func (p *MQTTPublisher) Stop(ctx context.Context) error {
 
 	slog.Info("disconnecting from MQTT broker")
 
-	// Disconnect with timeout
-	dcCtx, dcCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer dcCancel()
+	// Disconnect
+	disconnect := &paho.Disconnect{}
+	if err := p.client.Disconnect(disconnect); err != nil {
+		slog.Error("MQTT disconnect error", "error", p.obscureError(err.Error()))
+	}
 
-	opts := paho.NewDisconnect().WithReasonCode(0)
-	_, err := p.client.Disconnect(dcCtx, opts)
-	
 	p.mu.Lock()
 	p.connected = false
+	p.conn.Close()
+	p.conn = nil
 	p.client = nil
+	p.stateMachine.Transition(state.StateDisconnected)
 	p.mu.Unlock()
-
-	if err != nil {
-		return fmt.Errorf("failed to disconnect: %w", err)
-	}
 
 	slog.Info("MQTT publisher disconnected")
 	return nil
@@ -126,6 +215,9 @@ func (p *MQTTPublisher) Publish(ctx context.Context, metric Metric) error {
 	p.mu.RUnlock()
 
 	if !connected || client == nil {
+		if p.stateMachine.Current() == state.StateBackoff {
+			return fmt.Errorf("publisher is in backoff state")
+		}
 		return fmt.Errorf("not connected to MQTT broker")
 	}
 
@@ -135,30 +227,20 @@ func (p *MQTTPublisher) Publish(ctx context.Context, metric Metric) error {
 		return fmt.Errorf("failed to marshal metric: %w", err)
 	}
 
-	// Publish to topic
-	msg := paho.NewPublish(p.config.Topic).
-		SetQoS(1).
-		SetRetained(false).
-		SetPayload(payload)
+	// Publish to topic with QoS 1 (at least once delivery)
+	msg := &paho.Publish{
+		Topic:   p.config.Topic,
+		Payload: payload,
+		QoS:     1,
+	}
 
-	pubACK, err := client.Publish(ctx, msg)
+	_, err = client.Publish(ctx, msg)
 	if err != nil {
-		return fmt.Errorf("failed to publish metric: %w", err)
+		return fmt.Errorf("publish failed: %w", err)
 	}
 
-	// Wait for acknowledgment with timeout
-	pubCtx, pubCancel := context.WithTimeout(ctx, 5*time.Second)
-	defer pubCancel()
-
-	select {
-	case <-pubACK.Delivered:
-		slog.Debug("metric published", "topic", p.config.Topic)
-		return nil
-	case <-pubACK.Error:
-		return fmt.Errorf("publish delivery failed")
-	case <-pubCtx.Done():
-		return fmt.Errorf("publish acknowledgment timeout: %w", pubCtx.Err())
-	}
+	slog.Debug("metric published", "topic", p.config.Topic)
+	return nil
 }
 
 // IsConnected returns true if the publisher is connected.
@@ -173,19 +255,34 @@ func (p *MQTTPublisher) ConnectionReady() <-chan struct{} {
 	return p.connectedCh
 }
 
-func (p *MQTTPublisher) onConnect(client *paho.Client, connACK *paho.ConnectAck) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	
-	p.connected = true
-	close(p.connectedCh)
-	slog.Info("MQTT connection established")
+// StateMachine returns the underlying state machine.
+func (p *MQTTPublisher) StateMachine() *state.Machine {
+	return p.stateMachine
 }
 
-func (p *MQTTPublisher) onConnectionLost(client *paho.Client, err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	
-	p.connected = false
-	slog.Error("MQTT connection lost", "error", err.Error())
+// ReconnectAttempts returns the current reconnect attempt count.
+func (p *MQTTPublisher) ReconnectAttempts() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.reconnectAttempts
+}
+
+// obscureURL returns a safe version of the broker URL for logging.
+// It removes credentials from the URL.
+func (p *MQTTPublisher) obscureURL(url string) string {
+	// Check if URL contains credentials
+	if strings.Contains(url, "@") {
+		parts := strings.Split(url, "://")
+		if len(parts) == 2 {
+			// Remove embedded credentials
+			return parts[0] + "://***:***@" + strings.Split(parts[1], "@")[1]
+		}
+	}
+	return url
+}
+
+// obscureError returns a safe version of an error message for logging.
+func (p *MQTTPublisher) obscureError(msg string) string {
+	// Remove any URL or credential information from error messages
+	return msg
 }

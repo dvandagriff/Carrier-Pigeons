@@ -8,9 +8,9 @@ A high-performance, event-driven telemetry broker that ingests MQTT payloads fro
 ## Architecture Overview
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ Edge Nodes  │────▶│ MQTT Broker │────▶│ PigeonCoop  │
-└─────────────┘     └─────────────┘     └─────────────┘
+┌─────────────----┐     ┌─────────────┐     ┌─────────────┐
+│ CarrierPigeons  │────▶│ MQTT Broker │────▶│ PigeonCoop  │
+└─────────────----┘     └─────────────┘     └─────────────┘
                                                │
                                                ▼
                                         ┌─────────────┐

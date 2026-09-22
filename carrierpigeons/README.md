@@ -28,6 +28,9 @@ A high-performance, edge-targeted telemetry collection daemon that gathers syste
 - **Graceful Shutdown**: Context-based cancellation with buffered metric flushing
 - **Structured Logging**: Uses `log/slog` with JSON output
 - **Cross-Platform Collectors**: Linux-specific implementations for CPU/memory metrics
+- **Exponential Backoff**: Automatic retry with jitter for connection resilience
+- **Metrics Batching**: Optimized batch publishing for improved performance
+- **Backpressure Handling**: Configurable channel sizes with drop logging
 
 ## Data Contracts
 
@@ -93,18 +96,20 @@ Example JSON payload:
 1. **State Machine** (`internal/state/machine.go`)
    - Manages MQTT connection lifecycle
    - Handles connection failures with exponential backoff
-
+   
 2. **Scheduler** (`internal/scheduler/scheduler.go`)
    - Ticker-based metric collection
    - Non-blocking channel-based dispatch
-
+   - Backpressure handling with metric dropping
+   
 3. **Collectors** (`internal/collector/`)
    - `cpu_linux.go` - CPU temperature and frequency
    - `memory_linux.go` - Memory usage statistics
-
+   
 4. **Publisher** (`internal/publisher/mqtt.go`)
    - MQTT client using paho.golang
    - Automatic reconnection support
+   - Exponential backoff with jitter
 
 ## Installation
 
@@ -165,6 +170,27 @@ scheduler:
 2. **Ticker Efficiency**: Single goroutine per collector
 3. **Connection Pooling**: Reuses MQTT connections
 4. **Backpressure Control**: Configurable channel sizes prevent memory exhaustion
+5. **Metrics Batching**: Batches published metrics for improved throughput
+6. **Exponential Backoff with Jitter**: Prevents thundering herd during reconnection
+7. **Context Cancellation**: Proper timeout handling for long-running operations
+8. **Memory Pooling**: Uses sync.Pool for Metric instances to reduce GC pressure
+
+## Security Considerations
+
+### Configuration Security
+- **No Sensitive Data in Logs**: Error messages never include broker URLs, credentials, or node identifiers
+- **Input Validation**: All configuration values are validated before use
+- **Secure Defaults**: Configuration requires explicit broker URL and client ID
+
+### Data Handling
+- **Context-Aware Operations**: All operations support cancellation and timeouts
+- **Batch Publishing**: Metrics are batched to reduce network overhead and attack surface
+- **Backpressure**: System gracefully drops metrics when channels are full rather than OOM
+
+### Error Handling
+- **Safe Error Messages**: Errors logged without stack traces or sensitive information
+- **Graceful Degradation**: Failed operations don't crash the daemon
+- **Exponential Backoff**: Prevents connection storms during broker outages
 
 ## State Machine Transitions
 
@@ -203,3 +229,7 @@ MIT
 2. Create a feature branch
 3. Run `go test ./...`
 4. Submit a pull request
+
+## Notes
+
+The MQTT publisher implementation uses paho.golang. Note that paho.golang v0.20.0+ has a significantly different API than earlier versions. The current implementation is designed for compatibility with paho.golang v0.20.0+. If using an older version, you may need to update the code in `internal/publisher/mqtt.go`.

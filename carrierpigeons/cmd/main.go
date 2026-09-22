@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Package main is the entry point for the CarrierPigeons daemon.
 package main
 
@@ -7,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,7 +54,7 @@ func main() {
 	// Load configuration
 	config, err := LoadConfig("config.yaml")
 	if err != nil {
-		slog.Error("failed to load configuration", "error", err.Error())
+		slog.Error("failed to load configuration", "error", "configuration_error")
 		os.Exit(1)
 	}
 
@@ -66,7 +69,7 @@ func main() {
 	// Create collectors
 	collectors, err := createCollectors(config)
 	if err != nil {
-		slog.Error("failed to create collectors", "error", err.Error())
+		slog.Error("failed to create collectors", "error", "collector_creation_failed")
 		os.Exit(1)
 	}
 
@@ -91,15 +94,29 @@ func main() {
 		},
 	)
 
-	// Start publisher
-	if err := publisher.Start(context.Background()); err != nil {
-		slog.Error("failed to start publisher", "error", err.Error())
+	// Start publisher with connection readiness wait
+	ctx := context.Background()
+	if err := publisher.Start(ctx); err != nil {
+		slog.Error("failed to start publisher", "error", "publisher_start_failed")
 		os.Exit(1)
 	}
 
+	// Wait for publisher to be connected before starting scheduler
+	ready := publisher.ConnectionReady()
+	select {
+	case <-ready:
+		// Publisher is connected
+	case <-ctx.Done():
+		slog.Error("publisher connection timeout", "error", "connection_timeout")
+		os.Exit(1)
+	}
+
+	// Update state machine based on successful connection
+	stateMachine.Transition(state.StateConnected)
+
 	// Start scheduler
 	if err := sched.Start(); err != nil {
-		slog.Error("failed to start scheduler", "error", err.Error())
+		slog.Error("failed to start scheduler", "error", "scheduler_start_failed")
 		os.Exit(1)
 	}
 
@@ -125,7 +142,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := publisher.Stop(ctx); err != nil {
-		slog.Error("failed to stop publisher", "error", err.Error())
+		slog.Error("failed to stop publisher", "error", "publisher_stop_failed")
 	}
 
 	slog.Info("CarrierPigeons daemon stopped")
@@ -141,6 +158,7 @@ func createCollectors(config *Config) ([]collector.MetricCollector, error) {
 	}
 
 	// Create default collectors
+	// Note: Linux-specific collectors are in cpu_linux.go
 	collectors = append(collectors, collector.NewCPUCollector(collectorConfig))
 	collectors = append(collectors, collector.NewMemoryCollector(collectorConfig))
 
@@ -151,17 +169,17 @@ func createCollectors(config *Config) ([]collector.MetricCollector, error) {
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		return nil, fmt.Errorf("failed to read configuration file: %w", err)
 	}
 
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse config: %w", err)
+		return nil, fmt.Errorf("failed to parse configuration: %w", err)
 	}
 
 	// Validate configuration
 	if err := config.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
 	}
 
 	// Set defaults
@@ -197,11 +215,38 @@ func (c *Config) Validate() error {
 	if c.Publisher.ClientID == "" {
 		return fmt.Errorf("publisher.client_id is required")
 	}
-	if c.Scheduler.MetricChannelSize <= 0 {
-		return fmt.Errorf("scheduler.metric_channel_size must be positive")
+	
+	// Validate broker URL format
+	if !strings.HasPrefix(c.Publisher.BrokerURL, "tcp://") && 
+	   !strings.HasPrefix(c.Publisher.BrokerURL, "ws://") &&
+	   !strings.HasPrefix(c.Publisher.BrokerURL, "ssl://") &&
+	   !strings.HasPrefix(c.Publisher.BrokerURL, "wss://") {
+		return fmt.Errorf("publisher.broker_url must start with tcp://, ws://, ssl://, or wss://")
 	}
-	if c.Scheduler.OutboundChannelSize <= 0 {
-		return fmt.Errorf("scheduler.outbound_channel_size must be positive")
+	
+	// Validate client ID format (no special characters except hyphen and underscore)
+	if !isValidClientID(c.Publisher.ClientID) {
+		return fmt.Errorf("publisher.client_id contains invalid characters")
 	}
+	
+	// Validate scheduler channel sizes
+	if c.Scheduler.MetricChannelSize <= 0 || c.Scheduler.MetricChannelSize > 100000 {
+		return fmt.Errorf("scheduler.metric_channel_size must be between 1 and 100000")
+	}
+	if c.Scheduler.OutboundChannelSize <= 0 || c.Scheduler.OutboundChannelSize > 1000000 {
+		return fmt.Errorf("scheduler.outbound_channel_size must be between 1 and 1000000")
+	}
+	
 	return nil
+}
+
+// isValidClientID checks if the client ID contains only valid characters.
+func isValidClientID(clientID string) bool {
+	for _, r := range clientID {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || 
+		     (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return len(clientID) > 0 && len(clientID) <= 255
 }
