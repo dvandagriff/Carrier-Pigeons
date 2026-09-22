@@ -3,6 +3,7 @@ package publisher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -16,11 +17,11 @@ import (
 
 // MQTTPublisher implements Publisher using the Paho MQTT client library.
 type MQTTPublisher struct {
-	config       *PublisherConfig
-	client       *paho.Client
-	mu           sync.RWMutex
-	connectedCh  chan struct{}
-	connected    bool
+	config      *PublisherConfig
+	client      *paho.Client
+	mu          sync.RWMutex
+	connectedCh chan struct{}
+	connected   bool
 
 	// State machine for connection lifecycle
 	stateMachine *state.Machine
@@ -222,7 +223,7 @@ func (p *MQTTPublisher) Publish(ctx context.Context, metric Metric) error {
 	}
 
 	// Convert metric to JSON payload
-	payload, err := metric.MarshalJSON()
+	payload, err := json.Marshal(metric)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metric: %w", err)
 	}

@@ -3,7 +3,6 @@ package publisher
 
 import (
 	"context"
-	"encoding/json"
 )
 
 // Publisher defines the interface for publishing telemetry data.
@@ -27,11 +26,11 @@ type Publisher interface {
 
 // Metric represents a telemetry metric to be published.
 type Metric struct {
-	NodeID      string            `json:"node_id"`
-	Timestamp   string            `json:"timestamp"`
-	MetricType  string            `json:"metric_type"`
-	Value       float64           `json:"value"`
-	Metadata    map[string]string `json:"metadata"`
+	NodeID     string            `json:"node_id"`
+	Timestamp  string            `json:"timestamp"`
+	MetricType string            `json:"metric_type"`
+	Value      float64           `json:"value"`
+	Metadata   map[string]string `json:"metadata"`
 }
 
 // PublisherConfig holds configuration for the publisher.
@@ -45,15 +44,10 @@ type PublisherConfig struct {
 	CleanSession bool
 }
 
-// MarshalJSON implements custom JSON marshaling for Metric.
-func (m Metric) MarshalJSON() ([]byte, error) {
-	return json.Marshal(m)
-}
-
-// UnmarshalJSON implements custom JSON unmarshaling for Metric.
-func (m *Metric) UnmarshalJSON(data []byte) error {
-	return json.Unmarshal(data, m)
-}
+// Metric has no custom JSON marshaling: the embedded fields marshal/unmarshal
+// with their standard representations. Note that a MarshalJSON method that
+// calls json.Marshal on the same type would recurse infinitely, so none is
+// defined here.
 
 // ToCollectorMetric converts a publisher Metric to a collector Metric.
 func (m *Metric) ToCollectorMetric() (collectorMetric Metric) {
