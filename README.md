@@ -5,17 +5,18 @@
 
 <img src=".github/images/icon.jpeg" width="30%" style="position: relative; top: 0; right: 0;" alt="Project Logo"/>
 
-# <code>❯ REPLACE-ME</code>
+# <code>❯ Carrier Pigeons</code>
 
-<em>Edge telemetry, reliably delivered at scale</em>
+**Edge telemetry, reliably delivered at scale**
 
 <!-- BADGES -->
 <!-- local repository, no metadata badges. -->
 
-<em>Built with the tools and technologies:</em>
+~ Built with the tools and technologies ~
 
-<img src="https://img.shields.io/badge/Zsh-F15A24.svg?style=default&logo=Zsh&logoColor=white" alt="Zsh">
 <img src="https://img.shields.io/badge/Go-00ADD8.svg?style=default&logo=Go&logoColor=white" alt="Go">
+<img src="https://img.shields.io/badge/PostgreSQL-4169E1.svg?style=default&logo=postgresql&logoColor=white" alt="PostgreSQL">
+<img src="https://img.shields.io/badge/MQTT-660066.svg?style=default&logo=mqtt&logoColor=white" alt="MQTT">
 <img src="https://img.shields.io/badge/YAML-CB171E.svg?style=default&logo=YAML&logoColor=white" alt="YAML">
 
 </div>
